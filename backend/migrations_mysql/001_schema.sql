@@ -41,7 +41,7 @@ CREATE TABLE products (
             ELSE 'Above 1L'
         END
     ) STORED,
-    usage              ENUM('daily_wear', 'office_wear', 'party_wear', 'festive', 'bridal'),  -- unpopulated, see project notes
+    `usage`            ENUM('daily_wear', 'office_wear', 'party_wear', 'festive', 'bridal'),  -- unpopulated, see project notes
     age_group          ENUM('teens', 'elegant', 'classic'),                                   -- unpopulated, see project notes
     UNIQUE KEY products_source_product_id_key (source_product_id),
     KEY products_price_range_idx (price_range)
@@ -64,7 +64,7 @@ CREATE TABLE search_history (
     category     ENUM('earrings', 'pendants', 'necklace', 'rings', 'bangles', 'bracelets'),
     price_band   ENUM('below_10k', '10k_25k', '25k_50k', '50k_1l', 'above_1l'),
     age_group    ENUM('teens', 'elegant', 'classic'),
-    usage        ENUM('daily_wear', 'office_wear', 'party_wear', 'festive', 'bridal'),
+    `usage`      ENUM('daily_wear', 'office_wear', 'party_wear', 'festive', 'bridal'),
     search_type  VARCHAR(20) NOT NULL DEFAULT 'voice',
     created_at   DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     KEY search_history_user_id_idx (user_id)
