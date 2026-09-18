@@ -3,7 +3,6 @@ uvicorn[standard]>=0.34
 pydantic>=2.10
 pydantic-settings>=2.7
 pymysql>=1.1
-boto3>=1.35
 pillow>=11.0
 requests>=2.32
 openai>=1.50

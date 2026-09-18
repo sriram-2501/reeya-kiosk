@@ -9,7 +9,7 @@ from app.models.schemas import ImageSearchRequest, ImageSearchResponse, ProductM
 from app.services.db import get_connection, new_uuid
 from app.services.embeddings import get_image_embedding
 from app.services.filter_constants import CATEGORY_PATTERNS
-from app.services.s3 import download_image_bytes
+from app.services.storage import download_image_bytes
 
 logger = logging.getLogger(__name__)
 

@@ -33,7 +33,7 @@ import requests
 from app.config import get_settings
 from app.services.db import get_connection
 from app.services.embeddings import EMBEDDING_MODEL_NAME, get_image_embedding
-from app.services.s3 import download_image_bytes
+from app.services.storage import download_image_bytes
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("index_catalog")

@@ -14,11 +14,13 @@ class Settings(BaseSettings):
     mysql_password: str
     mysql_database: str = "reeya_kiosk"
 
-    # AWS S3
-    aws_access_key_id: str
-    aws_secret_access_key: str
-    aws_region: str
-    s3_bucket_name: str
+    # Local file storage on the VPS (replaces AWS S3 -- see app/services/storage.py
+    # for why: MinIO's free binary distribution turned out to be discontinued).
+    # public_base_url is this backend's own public URL (e.g.
+    # https://kiosk-api.reeyalifestyle.com) -- used to build absolute
+    # presigned-upload and public object URLs the browser can hit directly.
+    public_base_url: str = "http://localhost:8010"
+    upload_signing_secret: str
 
     # Embeddings: hosted via the Gemini API (see app/services/embeddings.py) —
     # switched from a locally-run CLIP model to remove the torch/transformers
