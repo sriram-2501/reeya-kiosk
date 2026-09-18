@@ -21,6 +21,13 @@ class Settings(BaseSettings):
     # presigned-upload and public object URLs the browser can hit directly.
     public_base_url: str = "http://localhost:8010"
     upload_signing_secret: str
+    # Where uploaded files actually live on disk. Must be a path Apache's
+    # www-data user can read+traverse -- defaults to a folder alongside this
+    # repo for local dev, but on the VPS this needs overriding to somewhere
+    # outside /root entirely (which is mode 700, unreadable to anyone but
+    # root -- found the hard way, a real 403 from Apache on first deploy),
+    # e.g. /var/www/kiosk-storage.
+    storage_root: str = ""
 
     # Embeddings: hosted via the Gemini API (see app/services/embeddings.py) —
     # switched from a locally-run CLIP model to remove the torch/transformers

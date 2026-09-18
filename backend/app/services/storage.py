@@ -32,8 +32,16 @@ import requests
 
 from app.config import get_settings
 
-# .../backend/storage — three levels up from this file (app/services/storage.py).
-STORAGE_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "storage")
+# Defaults to .../backend/storage (three levels up from this file) for
+# local dev; STORAGE_ROOT env var overrides it in production, where it must
+# point somewhere Apache's www-data user can actually read (see config.py's
+# comment on storage_root -- /root is mode 700 and blocks this entirely).
+_DEFAULT_STORAGE_ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "storage")
+
+
+def _storage_root() -> str:
+    return get_settings().storage_root or _DEFAULT_STORAGE_ROOT
+
 
 _SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -88,7 +96,7 @@ def save_upload(object_key: str, data: bytes) -> None:
     this — this function trusts object_key completely, so it must never be
     passed anything that didn't already go through build_object_key or a
     verified signature."""
-    path = os.path.join(STORAGE_ROOT, object_key)
+    path = os.path.join(_storage_root(), object_key)
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "wb") as f:
         f.write(data)
