@@ -26,13 +26,14 @@ Anything else (draft/pending/etc.) is skipped, same as a missing image.
 
 import logging
 import sys
+import uuid
 
 import requests
 
 from app.config import get_settings
+from app.services.db import get_connection
 from app.services.embeddings import EMBEDDING_MODEL_NAME, get_image_embedding
 from app.services.s3 import download_image_bytes
-from app.services.supabase import get_supabase_client
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("index_catalog")
@@ -93,7 +94,6 @@ def upsert_products(products: list[dict]) -> None:
     with a screenshot as its "image") that were never meant to reach the
     kiosk.
     """
-    supabase = get_supabase_client()
     records = []
     for product in products:
         if product.get("status") != "publish":
@@ -134,34 +134,51 @@ def upsert_products(products: list[dict]) -> None:
 
         categories = product.get("categories") or []
         records.append(
-            {
-                "source_product_id": product["id"],
-                "name": product["name"],
-                "category": categories[0]["name"] if categories else None,
-                "price": product.get("price"),
-                "image_s3_url": image_url,
-            }
+            (
+                product["id"],
+                product["name"],
+                categories[0]["name"] if categories else None,
+                product.get("price"),
+                image_url,
+            )
         )
 
     if not records:
         return
-    supabase.table("products").upsert(records, on_conflict="source_product_id").execute()
+
+    with get_connection() as conn, conn.cursor() as cur:
+        for source_product_id, name, category, price, image_s3_url in records:
+            # ON DUPLICATE KEY UPDATE matches Postgres's upsert(on_conflict=
+            # "source_product_id") -- a fresh id is only generated on genuine
+            # insert (MySQL's ON DUPLICATE KEY UPDATE keeps the existing row's
+            # id untouched, so `id` isn't part of the UPDATE clause at all).
+            cur.execute(
+                """
+                INSERT INTO products (id, source_product_id, name, category, price, image_s3_url)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                    name = VALUES(name),
+                    category = VALUES(category),
+                    price = VALUES(price),
+                    image_s3_url = VALUES(image_s3_url)
+                """,
+                (str(uuid.uuid4()), source_product_id, name, category, price, image_s3_url),
+            )
     logger.info("Upserted %d product rows", len(records))
 
 
 def fetch_products_needing_embedding() -> list[dict]:
-    supabase = get_supabase_client()
-    result = (
-        supabase.table("products")
-        .select("id, image_s3_url")
-        .or_(f"embedding.is.null,embedding_model.neq.{EMBEDDING_MODEL_NAME}")
-        .execute()
-    )
-    return result.data
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, image_s3_url FROM products WHERE embedding IS NULL OR embedding_model IS NULL OR embedding_model != %s",
+            (EMBEDDING_MODEL_NAME,),
+        )
+        return cur.fetchall()
 
 
 def embed_and_update(product: dict) -> bool:
-    supabase = get_supabase_client()
+    import json
+
     try:
         image_bytes = download_image_bytes(product["image_s3_url"])
         embedding = get_image_embedding(image_bytes)
@@ -169,9 +186,11 @@ def embed_and_update(product: dict) -> bool:
         logger.exception("Failed to embed product id=%s (%s)", product["id"], product["image_s3_url"])
         return False
 
-    supabase.table("products").update(
-        {"embedding": embedding, "embedding_model": EMBEDDING_MODEL_NAME}
-    ).eq("id", product["id"]).execute()
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE products SET embedding = %s, embedding_model = %s WHERE id = %s",
+            (json.dumps(embedding), EMBEDDING_MODEL_NAME, product["id"]),
+        )
     return True
 
 

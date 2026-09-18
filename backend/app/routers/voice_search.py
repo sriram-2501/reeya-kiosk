@@ -4,9 +4,9 @@ from uuid import UUID
 from fastapi import APIRouter
 
 from app.models.schemas import ExtractedFilters, SearchHistoryItem, VoiceMatch, VoiceSearchRequest, VoiceSearchResponse
+from app.services.db import get_connection, new_uuid
 from app.services.extract_filters import extract_search_filters
 from app.services.filter_constants import CATEGORY_PATTERNS, PRICE_BAND_RANGES
-from app.services.supabase import get_supabase_client
 
 logger = logging.getLogger(__name__)
 
@@ -46,71 +46,83 @@ def voice_search(payload: VoiceSearchRequest) -> VoiceSearchResponse:
     age_groups = _merge_filter(extracted.get("age_group"), payload.age_group)
     usages = _merge_filter(extracted.get("usage"), payload.usage)
 
-    supabase = get_supabase_client()
     understood = bool(category) or bool(price_bands) or bool(age_groups) or bool(usages)
     matches: list[dict] = []
 
-    # A category tap with no voice/text query at all (plain category browse)
-    # has an empty transcript and no filters yet — that's not "didn't
-    # understand", it's just browsing, so it still runs the (unfiltered)
-    # query below. A real transcript that recognized nothing, though, should
-    # report no results instead of silently showing an unrelated product
-    # list that looks like a match but isn't.
-    if not transcript.strip() or understood:
-        query = supabase.table("products").select("id, name, image_s3_url, price, category")
+    with get_connection() as conn, conn.cursor() as cur:
+        # A category tap with no voice/text query at all (plain category browse)
+        # has an empty transcript and no filters yet — that's not "didn't
+        # understand", it's just browsing, so it still runs the (unfiltered)
+        # query below. A real transcript that recognized nothing, though, should
+        # report no results instead of silently showing an unrelated product
+        # list that looks like a match but isn't.
+        if not transcript.strip() or understood:
+            where_clauses = []
+            params: list = []
 
-        if category and category in CATEGORY_PATTERNS:
-            query = query.filter("category", "imatch", CATEGORY_PATTERNS[category])
+            if category and category in CATEGORY_PATTERNS:
+                where_clauses.append("category REGEXP %s")
+                params.append(CATEGORY_PATTERNS[category])
 
-        valid_bands = [band for band in price_bands or [] if band in PRICE_BAND_RANGES]
-        if valid_bands:
-            # price = 0 means "no real price set" (see products.price_range's
-            # 'Unknown' bucket), not a genuinely free/near-free item — exclude
-            # it explicitly, since price >= 0 would otherwise let it leak into
-            # the cheapest band.
-            query = query.gt("price", 0)
-            # Multiple bands are OR'd together (e.g. "Below 10K" or "Above 1L"),
-            # each band itself an AND of its own min/max bounds.
-            or_clauses = []
-            for band in valid_bands:
-                min_price, max_price = PRICE_BAND_RANGES[band]
-                if max_price is not None:
-                    or_clauses.append(f"and(price.gte.{min_price},price.lt.{max_price})")
-                else:
-                    or_clauses.append(f"price.gte.{min_price}")
-            query = query.or_(",".join(or_clauses))
+            valid_bands = [band for band in price_bands or [] if band in PRICE_BAND_RANGES]
+            if valid_bands:
+                # price = 0 means "no real price set", not a genuinely
+                # free/near-free item — exclude it explicitly, since
+                # price >= 0 would otherwise let it leak into the cheapest band.
+                where_clauses.append("price > 0")
+                or_parts = []
+                for band in valid_bands:
+                    min_price, max_price = PRICE_BAND_RANGES[band]
+                    if max_price is not None:
+                        or_parts.append("(price >= %s AND price < %s)")
+                        params.extend([min_price, max_price])
+                    else:
+                        or_parts.append("price >= %s")
+                        params.append(min_price)
+                where_clauses.append("(" + " OR ".join(or_parts) + ")")
 
-        if age_groups:
-            query = query.in_("age_group", age_groups)
+            if age_groups:
+                placeholders = ",".join(["%s"] * len(age_groups))
+                where_clauses.append(f"age_group IN ({placeholders})")
+                params.extend(age_groups)
 
-        if usages:
-            query = query.in_("usage", usages)
+            if usages:
+                placeholders = ",".join(["%s"] * len(usages))
+                where_clauses.append(f"`usage` IN ({placeholders})")
+                params.extend(usages)
 
-        matches = query.limit(MATCH_LIMIT).execute().data
+            sql = "SELECT id, name, image_s3_url, price, category FROM products"
+            if where_clauses:
+                sql += " WHERE " + " AND ".join(where_clauses)
+            sql += " LIMIT %s"
+            params.append(MATCH_LIMIT)
 
-    history = (
-        supabase.table("search_history")
-        .insert(
-            {
-                "user_id": str(user_id),
-                "transcript": transcript,
-                "category": category,
-                # search_history's columns hold a single value each (see
-                # schema.sql CHECK constraints) — when multiple were picked,
-                # only the first is logged here. Product filtering above is
-                # unaffected; this only makes the analytics log lossy for
-                # multi-select searches.
-                "price_band": price_bands[0] if price_bands else None,
-                "age_group": age_groups[0] if age_groups else None,
-                "usage": usages[0] if usages else None,
-                "search_type": "voice",
-            }
+            cur.execute(sql, params)
+            matches = cur.fetchall()
+
+        history_id = new_uuid()
+        cur.execute(
+            "INSERT INTO search_history (id, user_id, transcript, category, price_band, age_group, `usage`, search_type) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                history_id,
+                str(user_id),
+                transcript,
+                category,
+                # search_history's columns hold a single value each (see the
+                # ENUM columns in migrations_mysql/001_schema.sql) — when
+                # multiple were picked, only the first is logged here.
+                # Product filtering above is unaffected; this only makes the
+                # analytics log lossy for multi-select searches.
+                price_bands[0] if price_bands else None,
+                age_groups[0] if age_groups else None,
+                usages[0] if usages else None,
+                "voice",
+            ),
         )
-        .execute()
-    )
 
     return VoiceSearchResponse(
-        search_history_id=history.data[0]["id"],
+        search_history_id=history_id,
         transcript=transcript,
         extracted_filters=ExtractedFilters(
             category=category,
@@ -124,12 +136,11 @@ def voice_search(payload: VoiceSearchRequest) -> VoiceSearchResponse:
 
 @router.get("/search-history", response_model=list[SearchHistoryItem])
 def get_search_history(user_id: UUID) -> list[SearchHistoryItem]:
-    supabase = get_supabase_client()
-    result = (
-        supabase.table("search_history")
-        .select("*")
-        .eq("user_id", str(user_id))
-        .order("created_at", desc=True)
-        .execute()
-    )
-    return [SearchHistoryItem(**row) for row in result.data]
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, user_id, transcript, category, price_band, age_group, `usage`, search_type, created_at "
+            "FROM search_history WHERE user_id = %s ORDER BY created_at DESC",
+            (str(user_id),),
+        )
+        rows = cur.fetchall()
+    return [SearchHistoryItem(**row) for row in rows]

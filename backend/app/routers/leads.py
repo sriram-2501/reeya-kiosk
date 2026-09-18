@@ -1,10 +1,11 @@
+import json
 import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
 
 from app.models.schemas import LeadRequest, LeadResponse
-from app.services.supabase import get_supabase_client
+from app.services.db import get_connection, new_uuid
 
 router = APIRouter(tags=["leads"])
 
@@ -29,41 +30,35 @@ def submit_lead(payload: LeadRequest) -> LeadResponse:
     instead of creating a duplicate. `session_ids` accumulates every
     session_id this phone has ever submitted under, so the customer's full
     kiosk_events history across all their visits stays linkable."""
-    supabase = get_supabase_client()
     phone = normalize_phone(payload.phone)
     session_id = str(payload.session_id)
 
-    existing = supabase.table("leads").select("id, session_ids").eq("phone", phone).execute()
+    with get_connection() as conn, conn.cursor() as cur:
+        cur.execute("SELECT id, session_ids FROM leads WHERE phone = %s", (phone,))
+        existing = cur.fetchone()
 
-    if existing.data:
-        lead_id = existing.data[0]["id"]
-        session_ids = existing.data[0]["session_ids"] or []
-        if session_id not in session_ids:
-            session_ids.append(session_id)
+        if existing:
+            lead_id = existing["id"]
+            session_ids = json.loads(existing["session_ids"]) if existing["session_ids"] else []
+            if session_id not in session_ids:
+                session_ids.append(session_id)
 
-        supabase.table("leads").update(
-            {
-                "name": payload.name,
-                "session_ids": session_ids,
-                "item_count": payload.item_count,
-                "total_amount": payload.total_amount,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-            }
-        ).eq("id", lead_id).execute()
-    else:
-        inserted = (
-            supabase.table("leads")
-            .insert(
-                {
-                    "phone": phone,
-                    "name": payload.name,
-                    "session_ids": [session_id],
-                    "item_count": payload.item_count,
-                    "total_amount": payload.total_amount,
-                }
+            cur.execute(
+                "UPDATE leads SET name=%s, session_ids=%s, item_count=%s, total_amount=%s, updated_at=%s WHERE id=%s",
+                (
+                    payload.name,
+                    json.dumps(session_ids),
+                    payload.item_count,
+                    payload.total_amount,
+                    datetime.now(timezone.utc),
+                    lead_id,
+                ),
             )
-            .execute()
-        )
-        lead_id = inserted.data[0]["id"]
+        else:
+            lead_id = new_uuid()
+            cur.execute(
+                "INSERT INTO leads (id, phone, name, session_ids, item_count, total_amount) VALUES (%s,%s,%s,%s,%s,%s)",
+                (lead_id, phone, payload.name, json.dumps([session_id]), payload.item_count, payload.total_amount),
+            )
 
     return LeadResponse(id=lead_id)
